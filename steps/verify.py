@@ -41,13 +41,21 @@ CHECKS = [
      "OR j.request_payload->>'$.customerRef' <> BIN_TO_UUID(p.customer_id) "
      "OR j.request_payload->>'$.itemCode' <> BIN_TO_UUID(p.product_id) "
      "OR j.request_payload->>'$.optionCode' <> o.sku OR j.request_payload->>'$.qty' <> 1)"),
-    ('등록 이벤트(대기 작업마다 정확히 하나 · 어떤 작업도 둘 이상 아님)',
+    # 정합성 검사 발행 누락(RegisterEventCheck)과 같은 조건 — 대기 작업은 지금 실행 회차의 이벤트가 있어야 worker 가 안다
+    ('등록 이벤트(대기 작업마다 그 실행 회차로 정확히 하나 · 어떤 작업 · 회차도 둘 이상 아님)',
      "SELECT (SELECT COUNT(*) FROM (SELECT j.id FROM preorder_sync_jobs j "
      "LEFT JOIN preorder_outbox_events o ON o.aggregate_id = j.id AND o.aggregate_type = 'PREORDER_SYNC_JOB' "
-     "AND o.event_type = 'REGISTER_JOB_READY' WHERE j.job_type = 'REGISTER' AND j.status = 'PENDING' "
-     "GROUP BY j.id HAVING COUNT(o.id) <> 1) x) "
+     "AND o.event_type = 'REGISTER_JOB_READY' AND CAST(JSON_EXTRACT(o.payload, '$.run') AS UNSIGNED) = j.run "
+     "WHERE j.job_type = 'REGISTER' AND j.status = 'PENDING' GROUP BY j.id HAVING COUNT(o.id) <> 1) x) "
      "+ (SELECT COUNT(*) FROM (SELECT aggregate_id FROM preorder_outbox_events WHERE event_type = 'REGISTER_JOB_READY' "
-     "GROUP BY aggregate_id HAVING COUNT(*) > 1) y)"),
+     "GROUP BY aggregate_id, payload->>'$.run' HAVING COUNT(*) > 1) y)"),
+    ('등록 이벤트 본문 ≠ 작업(본문 · 회차 · 행위자)',
+     "SELECT COUNT(*) FROM preorder_outbox_events o JOIN preorder_sync_jobs j ON j.id = o.aggregate_id "
+     "JOIN preorders p ON p.id = j.preorder_id WHERE o.event_type = 'REGISTER_JOB_READY' AND ("
+     "o.payload->>'$.preorderId' <> p.preorder_token OR o.payload->>'$.syncJobId' <> BIN_TO_UUID(j.id) "
+     "OR JSON_EXTRACT(o.payload, '$.request') <> j.request_payload "
+     "OR CAST(JSON_EXTRACT(o.payload, '$.run') AS UNSIGNED) NOT BETWEEN 1 AND j.run "
+     "OR o.payload->>'$.actor' <> IF(CAST(JSON_EXTRACT(o.payload, '$.run') AS UNSIGNED) = 1, 'SYSTEM', 'ADMIN'))"),
     (f'보존 기간({OUTBOX_RETENTION_DAYS}일)이 지난 발행 완료 아웃박스(be 가 지웠어야 할 행)',
      f'SELECT COUNT(*) FROM preorder_outbox_events WHERE published_at <= %(now)s - INTERVAL {OUTBOX_RETENTION_DAYS} DAY'),
     ('결제 가능했던 예약인데 외부 번호 · 결제 가능 시각 없음',
@@ -65,6 +73,18 @@ CHECKS = [
     ('작업 시도 번호 연속',
      'SELECT COUNT(*) FROM (SELECT sync_job_id FROM preorder_sync_attempts '
      'GROUP BY sync_job_id HAVING COUNT(*) <> MAX(attempt_number)) x'),
+    ('결과 이벤트 id 없는 시도',
+     'SELECT COUNT(*) FROM preorder_sync_attempts WHERE event_id IS NULL'),
+    # worker 재시도 기본값: 세대 3번 × 차례 4번을 다 쓰면 DEAD_LETTER
+    ('DLQ 등록 작업의 시도 ≠ 3세대 × 4차례',
+     "SELECT COUNT(*) FROM preorder_sync_jobs j LEFT JOIN (SELECT sync_job_id, COUNT(*) AS n, MAX(generation) AS g, "
+     "MAX(generation_attempt) AS t FROM preorder_sync_attempts GROUP BY sync_job_id) a ON a.sync_job_id = j.id "
+     "WHERE j.status = 'DEAD_LETTER' AND (a.n IS NULL OR a.n <> 12 OR a.g <> 3 OR a.t <> 4)"),
+    # 관리자 재처리는 실행 회차를 올리고 DLQ 시각을 지운다(PreorderSyncJobRepository.reopen)
+    ('DEAD_LETTER 가 아닌데 DLQ 시각 있음 · 재처리 성공인데 실행 회차 1',
+     "SELECT (SELECT COUNT(*) FROM preorder_sync_jobs WHERE status <> 'DEAD_LETTER' AND dead_lettered_at IS NOT NULL) "
+     "+ (SELECT COUNT(DISTINCT j.id) FROM preorder_sync_jobs j JOIN preorder_sync_attempts a ON a.sync_job_id = j.id "
+     "WHERE a.actor = 'ADMIN' AND j.run < 2)"),
     ('시드 직후 결제 기한(24시간)이 지난 결제 가능 예약',
      "SELECT COUNT(*) FROM preorders p WHERE p.status = 'REGISTERED' "
      "AND p.payable_from + INTERVAL 24 HOUR <= %(now)s "

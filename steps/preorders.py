@@ -6,11 +6,12 @@
 
   아이폰 18 Pro (마감, 3,000건)
     1~1,650     PAID             결제 완료(RESERVED) — 주문 AWAITING_CONFIRMATION
-    1,651~1,800 UNPAID           결제 가능(REGISTERED, 기한 안) — 등록이 DLQ 에 갔다가 관리자 재처리로 늦게 성공해 1~21시간 전에 결제 가능
+    1,651~1,800 UNPAID           결제 가능(REGISTERED, 기한 안) — 등록이 DLQ 에 갔다가 관리자 재처리(실행 회차 2)로 늦게 성공해
+                                 1~21시간 전에 결제 가능
     1,801~2,250 EXPIRED          결제 기한 초과 취소(SYSTEM)
     2,251~2,450 CANCEL_REFUNDED  결제 후 사용자 취소 — 주문 CANCELED · 결제 REFUNDED
     2,451~2,850 CANCELED         결제 전 사용자 취소
-    2,851~2,940 DEAD_LETTER      외부 등록 5회 실패 → 관리자 재처리 대기
+    2,851~2,940 DEAD_LETTER      외부 등록이 세 세대(차례 12번)를 다 쓰고 실패 → 관리자 재처리 대기
     2,941~2,970 PENDING          등록 대기 — 아웃박스 미발행. 기동하면 릴레이가 발행한다
     2,971~3,000 LOST             등록 대기인데 Mock 원장에는 이미 있다(응답 유실 재현) — 보내면 Mock 이 201 로 재생한다
   갤럭시 Z 폴드8 (진행 중, 1,000건 · 다음 신청은 1,001번)
@@ -53,8 +54,13 @@ USER_CANCEL_REASONS = ['단순 변심', None, '다른 색상으로 다시 신청
 
 # Mock 이 등록을 확정한 뒤 be 가 성공을 받기까지. 확정 시각 = 결제 가능 시각 − 이 값
 CONFIRM_LEAD = timedelta(milliseconds=400)
-# DLQ 로 간 작업: SQS maxReceiveCount(5)만큼 실패하고, 5번째 실패 30초 뒤에 DLQ 로 옮겨졌다
-DEAD_LETTER_AFTER = seconds(520)
+# worker 재시도(be worker nova.worker.retry 기본값): 한 세대에 차례 4번(차례 사이 10 · 20 · 40초), 세대 3번(세대 사이 15분).
+# 차례 하나가 시도 기록 한 줄이다 — 차례 안에서 곧바로 한 번 더 보내는 것은 같은 줄에 들어간다. 세 세대를 다 쓰면 작업이 DEAD_LETTER 다
+ROUND_BACKOFF = [seconds(10), seconds(20), seconds(40)]
+GENERATIONS = 3
+GENERATION_GAP = timedelta(minutes=15)
+# 관리자 재처리를 누른 시각 — 재처리 실행의 첫 차례가 성공하기 1초 전
+REPROCESS_LEAD = seconds(1)
 # 결제하기를 눌러 주문이 생긴 시각 — 결제 확인 3분 전(주문 생성 = 결제 시작, payment_started_at)
 ORDER_LEAD = timedelta(minutes=3)
 # 발행 끝난 아웃박스 행은 7일 뒤 be 가 지운다(common:outbox 정리 작업, nova.outbox.retention 기본값)
@@ -130,6 +136,36 @@ class Plan:
         return self.product_no == 1 and self.bucket == UNPAID
 
     @property
+    def exhausted_rounds(self) -> list[tuple]:
+        """세 세대를 다 쓰고 실패한 첫 실행의 차례들: (세대, 차례, 결과, 시작, 끝). DLQ 묶음과 늦게 성공한 묶음만 있다.
+
+        홀수 차례는 Mock 주입 500, 짝수 차례는 응답이 없어 결과를 모른다(worker 읽기 타임아웃 5초).
+        """
+        if not (self.bucket == DEAD_LETTER or self.late_registered):
+            return []
+        rounds, started = [], self.created_at + seconds(1)
+        for generation in range(1, GENERATIONS + 1):
+            for turn in range(1, len(ROUND_BACKOFF) + 2):
+                finished = started + seconds(1 if turn % 2 else 5)
+                rounds.append((generation, turn, INJECTED_500 if turn % 2 else NO_RESPONSE, started, finished))
+                started = finished + (ROUND_BACKOFF[turn - 1] if turn <= len(ROUND_BACKOFF) else GENERATION_GAP)
+        return rounds
+
+    @property
+    def dead_lettered_at(self) -> datetime | None:
+        """지금 DEAD_LETTER 인 작업만 있다 — 관리자 재처리는 이 시각을 지운다(PreorderSyncJobRepository.reopen)."""
+        return self.exhausted_rounds[-1][4] + seconds(1) if self.bucket == DEAD_LETTER else None
+
+    @property
+    def reprocessed_at(self) -> datetime | None:
+        return self.confirm_at - REPROCESS_LEAD if self.late_registered else None
+
+    @property
+    def register_run(self) -> int:
+        """등록 작업의 실행 회차. 관리자 재처리마다 1 씩 오른다"""
+        return 2 if self.late_registered else 1
+
+    @property
     def cancel_job_created_at(self) -> datetime:
         """외부 취소 작업은 주문 정리가 끝난 뒤 생긴다. 결제한 예약은 환불이 끝난 뒤다."""
         return self.cancel_start + seconds(2 if self.bucket == CANCEL_REFUNDED else 1)
@@ -185,8 +221,8 @@ def _schedule(p: Plan, now: datetime) -> None:
     if p.late_registered:
         p.payable_from = now - timedelta(hours=1 + p.position % 20, minutes=p.position % 60)
     else:
-        # 보통 접수 2~4초 뒤. 20건에 1건은 첫 시도가 일시 실패해 30초 뒤 재시도로 확인됐다
-        p.payable_from = p.created_at + seconds(2 + p.position % 3 + (30 if p.n % 20 == 0 else 0))
+        # 보통 접수 2~4초 뒤. 20건에 1건은 첫 차례가 일시 실패해 10초 뒤 둘째 차례로 확인됐다
+        p.payable_from = p.created_at + seconds(2 + p.position % 3 + (10 if p.n % 20 == 0 else 0))
 
     if p.bucket in (PAID, CANCEL_REFUNDED):
         p.paid_at = p.payable_from + timedelta(minutes=5 + p.position % 300)
@@ -270,67 +306,84 @@ def _insert_jobs(cur, plans: list[Plan]) -> None:
     """외부 등록 작업은 예약마다 하나, 외부 취소 작업은 취소된 예약마다 하나."""
     rows = []
     for p in plans:
-        dead_lettered = p.created_at + DEAD_LETTER_AFTER if p.bucket == DEAD_LETTER or p.late_registered else None
         status = {DEAD_LETTER: 'DEAD_LETTER', PENDING: 'PENDING', LOST: 'PENDING'}.get(p.bucket, 'SUCCEEDED')
         rows.append((p.register_job_id.bytes, p.id.bytes, 'REGISTER', json.dumps(register_payload(p)), status,
-                     None, None, dead_lettered, p.created_at, p.confirm_at or dead_lettered or p.created_at))
+                     p.register_run, None, None, p.dead_lettered_at, p.created_at,
+                     p.confirm_at or p.dead_lettered_at or p.created_at))
         if p.cancel_start:
             # be CancelRequestPayload 그대로 — 번호 칸 이름은 reservationNo 다
             payload = {'externalKey': p.token, 'reservationNo': p.external_number,
                        'reason': 'USER_CANCEL' if p.cancel_actor == 'USER' else 'DEADLINE_EXCEEDED'}
-            rows.append((p.cancel_job_id.bytes, p.id.bytes, 'CANCEL', json.dumps(payload), 'SUCCEEDED',
+            rows.append((p.cancel_job_id.bytes, p.id.bytes, 'CANCEL', json.dumps(payload), 'SUCCEEDED', 1,
                          None, None, None, p.cancel_job_created_at, p.cancel_done - seconds(0.5)))
-    insert(cur, 'preorder_sync_jobs', ['id', 'preorder_id', 'job_type', 'request_payload', 'status', 'lease_token',
-                                       'lease_expires_at', 'dead_lettered_at', 'created_at', 'updated_at'], rows)
+    insert(cur, 'preorder_sync_jobs', ['id', 'preorder_id', 'job_type', 'request_payload', 'status', 'run',
+                                       'lease_token', 'lease_expires_at', 'dead_lettered_at', 'created_at',
+                                       'updated_at'], rows)
 
 
 def _insert_attempts(cur, plans: list[Plan]) -> None:
+    """시도 기록은 worker 가 보낸 결과 이벤트 하나가 한 줄이다(preorder SyncAttemptWriter).
+
+    번호(attempt_number)는 작업 안의 일련번호, 세대 · 차례(generation · generation_attempt)는 worker 가 센 값이다 —
+    관리자 재처리 뒤에는 worker 가 1세대 1차례부터 다시 센다. 결과 이벤트 id(event_id)로 같은 이벤트를 두 번 남기지 않는다.
+    """
     rows = []
 
-    def attempt(job_id, number, actor, outcome, started, finished):
+    def attempt(p, job_type, job_id, number, generation, turn, actor, outcome, started, finished):
         result, status, code, message = outcome
-        rows.append((job_id.bytes, number, actor, result, status, code, message, started, finished))
+        rows.append((job_id.bytes, number, generation, turn, actor, result, status, code, message, started, finished,
+                     uuid_of('attempt-event', job_type, p.n, number)))
 
     success = ('SUCCESS', 201, None, None)
     for p in plans:
-        if p.bucket == DEAD_LETTER or p.late_registered:
-            # SQS 숨김 시간이 30초부터 두 배씩 늘어난다: 접수 + 1 · 31 · 91 · 211 · 451초.
-            # 홀수 회차는 Mock 주입 500, 짝수 회차는 응답이 없어 결과를 모른다(워커 읽기 타임아웃 5초)
-            for k in range(1, 6):
-                started = p.created_at + seconds((2 ** (k - 1) - 1) * 30 + 1)
-                attempt(p.register_job_id, k, 'SYSTEM', INJECTED_500 if k % 2 else NO_RESPONSE,
-                        started, started + seconds(1 if k % 2 else 5))
-            if p.late_registered:
-                attempt(p.register_job_id, 6, 'ADMIN', success, p.confirm_at - seconds(0.5), p.confirm_at)
+        rounds = p.exhausted_rounds
+        for number, (generation, turn, outcome, started, finished) in enumerate(rounds, start=1):
+            attempt(p, 'REGISTER', p.register_job_id, number, generation, turn, 'SYSTEM', outcome, started, finished)
+        if p.late_registered:
+            # 재처리한 실행 — worker 가 다시 1세대 1차례부터 센다. 행위자는 재처리 메시지의 ADMIN
+            attempt(p, 'REGISTER', p.register_job_id, len(rounds) + 1, 1, 1, 'ADMIN', success,
+                    p.confirm_at - seconds(0.5), p.confirm_at)
         elif p.confirm_at:
             if p.n % 20 == 0:
-                attempt(p.register_job_id, 1, 'SYSTEM', INJECTED_500,
+                attempt(p, 'REGISTER', p.register_job_id, 1, 1, 1, 'SYSTEM', INJECTED_500,
                         p.created_at + seconds(0.5), p.created_at + seconds(1))
-            attempt(p.register_job_id, 2 if p.n % 20 == 0 else 1, 'SYSTEM', success,
+            first = 2 if p.n % 20 == 0 else 1
+            attempt(p, 'REGISTER', p.register_job_id, first, 1, first, 'SYSTEM', success,
                     p.confirm_at - seconds(0.5), p.confirm_at)
         if p.cancel_start:
             # 외부 취소는 한 번에 성공(Mock 취소는 200)
-            attempt(p.cancel_job_id, 1, 'SYSTEM', ('SUCCESS', 200, None, None),
+            attempt(p, 'CANCEL', p.cancel_job_id, 1, 1, 1, 'SYSTEM', ('SUCCESS', 200, None, None),
                     p.cancel_job_created_at + seconds(0.2), p.cancel_done - seconds(0.5))
-    insert(cur, 'preorder_sync_attempts', ['sync_job_id', 'attempt_number', 'actor', 'result', 'http_status',
-                                           'error_code', 'error_message', 'started_at', 'finished_at'], rows)
+    insert(cur, 'preorder_sync_attempts', ['sync_job_id', 'attempt_number', 'generation', 'generation_attempt',
+                                           'actor', 'result', 'http_status', 'error_code', 'error_message',
+                                           'started_at', 'finished_at', 'event_id'], rows)
 
 
 def _insert_outbox(cur, plans: list[Plan], now: datetime) -> None:
-    """등록 작업의 REGISTER_JOB_READY. payload 는 be RegisterJobReady 를 Jackson 이 쓴 모양 그대로다.
+    """등록 작업의 REGISTER_JOB_READY. payload 는 be RegisterJobReady 를 Jackson 이 쓴 모양 그대로다 —
+    worker 는 DB 를 읽지 않아 등록 본문(request)을 통째로 싣고, 실행 회차(run)를 결과에 돌려줘 지난 실행의 결과를 가린다.
+    접수 때 한 번(SYSTEM, 회차 1), 관리자 재처리 때마다 한 번(ADMIN, 오른 회차) 나간다.
 
     "지금 처리될" 예약(PENDING · LOST)만 미발행이다 — 끝난 예약을 미발행으로 두면 기동할 때 다시 발행된다.
     발행 끝난 행은 be 가 7일 뒤 지우므로, 7일 안에 발행된 것만 넣는다. 취소 쪽 이벤트는 이미 끝난 일이라 넣지 않는다.
     """
     rows = []
+
+    def event(p, event_id, actor, run, created, published):
+        if published and published <= now - OUTBOX_RETENTION:
+            return
+        payload = {'syncJobId': str(p.register_job_id), 'preorderId': p.token, 'request': register_payload(p),
+                   'actor': actor, 'run': run, 'jobType': 'REGISTER'}
+        rows.append((event_id, 'PREORDER_SYNC_JOB', p.register_job_id.bytes, 'REGISTER_JOB_READY',
+                     json.dumps(payload), 1 if published else 0, None, created, published))
+
     for p in plans:
         waiting = p.bucket in (PENDING, LOST)
-        published = None if waiting else p.created_at + timedelta(milliseconds=50)
-        if published and published <= now - OUTBOX_RETENTION:
-            continue
-        payload = {'syncJobId': str(p.register_job_id), 'preorderId': p.token, 'jobType': 'REGISTER'}
-        rows.append((uuid_of('outbox', p.n), 'PREORDER_SYNC_JOB', p.register_job_id.bytes, 'REGISTER_JOB_READY',
-                     json.dumps(payload), 0 if waiting else 1, None, p.created_at, published))
+        event(p, uuid_of('outbox', p.n), 'SYSTEM', 1, p.created_at,
+              None if waiting else p.created_at + timedelta(milliseconds=50))
+        if p.late_registered:
+            event(p, uuid_of('outbox', p.n, 'run', 2), 'ADMIN', 2, p.reprocessed_at,
+                  p.reprocessed_at + timedelta(milliseconds=50))
     insert(cur, 'preorder_outbox_events', ['event_id', 'aggregate_type', 'aggregate_id', 'event_type', 'payload',
                                            'publish_attempts', 'lease_until', 'created_at', 'published_at'], rows)
 
