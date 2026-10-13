@@ -31,6 +31,8 @@ SHOP_TABLES = [
     'preorder_events', 'preorders', 'shipment_batches', 'preorder_campaigns', 'refresh_tokens', 'customers',
     'option_inventories', 'product_options', 'products', 'catalog_outbox_events', 'categories',
 ]
+# 아직 be dev 에 없는 테이블 — 있을 때만 비운다(정합성 검사 결과는 epic/NV-441 마이그레이션에만 있다). dev 에 들어오면 위로 옮긴다
+OPTIONAL_SHOP_TABLES = ['reconciliation_findings', 'reconciliation_runs']
 
 
 def connect(url: str, label: str) -> pymysql.connections.Connection:
@@ -51,6 +53,13 @@ def refuse_shared(conn, label: str) -> None:
         basedir = cur.fetchone()[0]
     if basedir.startswith('/rdsdbbin/'):
         raise SystemExit(f'{label} 가 RDS 로 보여 멈춘다({basedir}). 시드는 로컬 전용이다.')
+
+
+def existing(cur, tables: list[str]) -> list[str]:
+    """지금 database 에 있는 것만 — 순서는 그대로"""
+    cur.execute('SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()')
+    present = {name for (name,) in cur.fetchall()}
+    return [table for table in tables if table in present]
 
 
 def truncate(cur, tables: list[str]) -> None:
@@ -100,7 +109,7 @@ def main() -> int:
     now = utc_now()
     print(f'▶ shop 비우고 채우기 (기준 시각 {now:%Y-%m-%d %H:%M:%S} UTC)')
     with shop.cursor() as cur:
-        truncate(cur, SHOP_TABLES)
+        truncate(cur, SHOP_TABLES + existing(cur, OPTIONAL_SHOP_TABLES))
         cat = catalog.seed(cur, now)
         campaigns = campaign.seed(cur, now, cat)
         people = customers.seed(cur, now)

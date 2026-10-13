@@ -19,6 +19,7 @@
 
 MySQL 하나에 shop · external_mock 을 같이 만든다(운영과 같은 구성). Git Bash 에서, be · mock 저장소가 이 저장소 옆에 있다고 본다.
 be 는 `dev`, mock 은 `epic/NV-1` 을 받아 둔다 — 그보다 옛 Mock 스키마는 원장 회원 · 상품 칸이 `BINARY(16)` 이 아니라 시드가 들어가지 않는다.
+정합성 검사 결과 테이블까지 쓰려면 be 를 `epic/NV-441` 로 받는다(dev 에 합쳐지기 전). 시드는 그 두 테이블이 있으면 같이 비운다.
 
 ```bash
 docker run -d --name seed-db -p 127.0.0.1:3309:3306 -e MYSQL_ROOT_PASSWORD=seed mysql:8.4 --transaction-isolation=READ-COMMITTED
@@ -109,7 +110,7 @@ python seed.py --shop mysql://root:seed@127.0.0.1:3309/shop --mock mysql://root:
 
 ## 고칠 때
 
-- 스키마가 바뀌면 그 테이블을 넣는 단계만 고친다. 테이블이 늘면 `seed.py` 의 `SHOP_TABLES` 에도 더한다(빠뜨리면 두 번째 실행이 PK 충돌로 멈추거나 이전 데이터가 남는다)
+- 스키마가 바뀌면 그 테이블을 넣는 단계만 고친다. 테이블이 늘면 `seed.py` 의 `SHOP_TABLES` 에도 더한다(빠뜨리면 두 번째 실행이 PK 충돌로 멈추거나 이전 데이터가 남는다). be `dev` 에 아직 없는 테이블은 `OPTIONAL_SHOP_TABLES`(있을 때만 비운다)에 두고, dev 에 들어오면 `SHOP_TABLES` 로 옮긴다
 - 상품 · 카테고리는 `steps/catalog.py`, 회차 일정은 `steps/campaign.py` 의 표만 바꾼다. 예약 3,000 · 1,000건은 상품 번호 1 · 2 에 붙는다
 - Faker 를 부르는 순서가 바뀌면 그 뒤 회원의 값이 다 바뀐다. 회원 컬럼을 늘리면 맨 뒤에서 부른다
 
