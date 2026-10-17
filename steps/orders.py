@@ -167,12 +167,17 @@ def seed(cur, now: datetime, catalog: Catalog, customers: dict[int, Customer],
 
 
 def _insert_orders(cur, orders: list[Order]) -> None:
-    insert(cur, 'orders', ['id', 'order_token', 'customer_id', 'source', 'preorder_id', 'preorder_token', 'status',
-                           'authorizing_provider_order_id', 'total_amount', 'payment_due_at', 'stock_released_at',
+    insert(cur, 'orders', ['id', 'order_token', 'customer_id', 'source', 'preorder_id', 'preorder_token', 'idempotency_key',
+                           'status', 'authorizing_provider_order_id', 'total_amount', 'payment_due_at', 'stock_released_at',
+                           'paid_at',
                            'ship_to_name', 'ship_to_phone', 'ship_to_postal_code', 'ship_to_line1', 'ship_to_line2',
                            'internal_note', 'event_sequence', 'created_at', 'updated_at'],
+           # 바로 구매는 화면이 누름마다 만든 멱등 키를 반드시 갖는다(ck_order_idempotency). 결제 시각은 승인 완료로 넘어간 때 —
+           # be 백필(V202610161601)과 같은 기준이다
            [(o.id.bytes, o.token, o.customer.id.bytes, o.source, o.preorder_id.bytes if o.preorder_id else None,
-             o.preorder_token, o.status, None, o.total, o.payment_due_at, o.stock_released_at,
+             o.preorder_token, uuid7(o.events[0].at, 'idempotency', o.token).bytes if o.source == 'BUY_NOW' else None,
+             o.status, None, o.total, o.payment_due_at, o.stock_released_at,
+             o.at('AWAITING_CONFIRMATION', 'AUTHORIZING'),
              # 배송지는 회원 기본 배송지를 복사한다
              o.customer.name, o.customer.phone, o.customer.postal_code, o.customer.line1, o.customer.line2,
              None, len(o.events), o.events[0].at, o.events[-1].at)

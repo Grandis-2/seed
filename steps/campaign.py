@@ -53,7 +53,8 @@ def seed(cur, now: datetime, catalog: Catalog) -> dict[int, Campaign]:
         opens, closes = now + timedelta(days=open_day), now + timedelta(days=close_day)
         created = opens - timedelta(days=7)
         notified = opens <= now  # 오픈 알림은 오픈한 회차만 보냈다
-        rows.append((catalog.product_ids[product_no].bytes, opens, closes, 0, 1, 0, 1,
+        # 상품명 · 판매 상태는 catalog 등록 이벤트가 실어 온 사본이다(오픈 알림 문구 · 판정에 쓴다). 시드 사전예약 상품은 모두 판매 중
+        rows.append((catalog.product_ids[product_no].bytes, opens, closes, 0, 1, 0, catalog.product_titles[product_no], 'ACTIVE', 1,
                      opens + seconds(1) if notified else None, created, opens if notified else created))
         batch_ids = {n: uuid7(created, 'batch', product_no, n) for n, *_ in BATCHES}
         campaigns[product_no] = Campaign(product_no, opens, closes, batch_ids)
@@ -61,7 +62,8 @@ def seed(cur, now: datetime, catalog: Catalog) -> dict[int, Campaign]:
                      closes.date() + timedelta(days=s), closes.date() + timedelta(days=e), created)
                     for n, start, end, s, e in BATCHES]
     insert(cur, 'preorder_campaigns', ['product_id', 'opens_at', 'closes_at', 'schedule_version', 'visible',
-                                       'visibility_version', 'next_queue_position', 'open_notified_at',
+                                       'visibility_version', 'product_title', 'product_status', 'next_queue_position',
+                                       'open_notified_at',
                                        'created_at', 'updated_at'], rows)
     insert(cur, 'shipment_batches', ['id', 'product_id', 'batch_number', 'position_from', 'position_to',
                                      'estimated_ship_start', 'estimated_ship_end', 'created_at'], batches)

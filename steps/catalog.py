@@ -79,6 +79,8 @@ IN_STOCK_EXTRAS = [
     ('마우스', 'MOUSE', 'NOVA 마우스 (판매 중지)', 59_000, 30, True),
 ]
 STOCK = 30  # 옵션마다 배정한 총량
+# 제조사(be products.brand — CHECK 로 이 셋만 받는다). 사전예약 모델은 이름대로, NOVA 일반 상품은 브랜드 필터에 셋이 다 보이게 번갈아
+BRANDS = ['SAMSUNG', 'APPLE', 'LG']
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,12 @@ def _products() -> list[_Product]:
     return rows
 
 
+def _brand(p: _Product) -> str:
+    if p.mode == PREORDER:
+        return 'SAMSUNG' if p.title.startswith('갤럭시') else 'APPLE'
+    return BRANDS[p.no % len(BRANDS)]
+
+
 def _axes(p: _Product) -> list[dict]:
     colors = {'key': 'color', 'label': '색상', 'values': [
         {'id': hex_id(p.no, 'color', name), 'value': name, 'normalized': name, 'hex': hex_color, 'surcharge': 0,
@@ -178,7 +186,9 @@ def seed(cur, now: datetime) -> Catalog:
         document = {'axes': axes, 'defaultImages': [], 'detailImages': [],
                     'warranty': {'offered': p.warranty > 0, 'surcharge': p.warranty}}
         thumbnail = axes[0]['values'][0]['images'][0]['url']
-        products.append((product_id.bytes, None, category_ids[p.category].bytes, p.mode, p.title, p.base_price,
+        # 모델명(be products.model_name)은 sku 코드를 쓴다
+        products.append((product_id.bytes, None, category_ids[p.category].bytes, p.mode, p.title, _brand(p), p.code,
+                         p.base_price,
                          json.dumps(document, ensure_ascii=False), thumbnail, p.description, None,
                          # 판매 중지는 be 관리자 기능처럼 상품 상태만 바꾼다(옵션은 그대로) — 회원 목록에서 빠지고 상세에 판매 중지로 보인다
                          'PAUSED' if p.paused else 'ACTIVE', 1, None,
@@ -206,7 +216,8 @@ def seed(cur, now: datetime) -> Catalog:
                     # reserved · sold 는 일반 주문을 넣은 뒤 orders 단계가 주문 수량으로 맞춘다
                     inventories.append((option_id.bytes, p.stock, 0, 0, created))
 
-    insert(cur, 'products', ['id', 'idempotency_key', 'category_id', 'sale_mode', 'title', 'base_price', 'options',
+    insert(cur, 'products', ['id', 'idempotency_key', 'category_id', 'sale_mode', 'title', 'brand', 'model_name',
+                             'base_price', 'options',
                              'thumbnail_url', 'description', 'tags', 'status', 'visible', 'campaign_canceled_at',
                              'created_at', 'updated_at'], products)
     insert(cur, 'product_options', ['id', 'product_id', 'sku', 'title', 'price', 'filter_attributes',
