@@ -191,7 +191,10 @@ def seed(cur, now: datetime) -> Catalog:
                          p.base_price,
                          json.dumps(document, ensure_ascii=False), thumbnail, p.description, None,
                          # 판매 중지는 be 관리자 기능처럼 상품 상태만 바꾼다(옵션은 그대로) — 회원 목록에서 빠지고 상세에 판매 중지로 보인다
-                         'PAUSED' if p.paused else 'ACTIVE', 1, None,
+                         'PAUSED' if p.paused else 'ACTIVE',
+                         # 일반 상품의 판매 준비(be products.stock_ready_at) — 재고 행을 같이 넣으니 만든 시각. 비면 catalog 가 목록에서 빼고
+                         # 상세를 404 로 준다. 사전예약 상품은 회차가 준비를 정해 NULL
+                         created if p.mode == IN_STOCK else None, 1, None,
                          created, created))
 
         storages = list(enumerate(STORAGES)) if p.storage else [(None, None)]
@@ -218,7 +221,8 @@ def seed(cur, now: datetime) -> Catalog:
 
     insert(cur, 'products', ['id', 'idempotency_key', 'category_id', 'sale_mode', 'title', 'brand', 'model_name',
                              'base_price', 'options',
-                             'thumbnail_url', 'description', 'tags', 'status', 'visible', 'campaign_canceled_at',
+                             'thumbnail_url', 'description', 'tags', 'status', 'stock_ready_at', 'visible',
+                             'campaign_canceled_at',
                              'created_at', 'updated_at'], products)
     insert(cur, 'product_options', ['id', 'product_id', 'sku', 'title', 'price', 'filter_attributes',
                                     'combination_key', 'status', 'created_at', 'updated_at'], options)

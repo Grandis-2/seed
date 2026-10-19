@@ -133,11 +133,11 @@ CHECKS = [
      "GROUP BY oi.option_id) x ON x.option_id = i.option_id "
      "WHERE i.stock_reserved <> COALESCE(x.reserved, 0) OR i.stock_sold <> COALESCE(x.sold, 0)"),
     # ── 카탈로그
-    ('목록에 보일 상품인데 준비 안 됨(사전예약은 회차 · 일반은 재고 행)',
+    ('목록에 보일 상품인데 준비 안 됨(사전예약은 회차 · 일반은 판매 준비 시각과 재고 행)',
      "SELECT COUNT(*) FROM products p WHERE p.visible = 1 AND p.status = 'ACTIVE' AND NOT (CASE "
      "WHEN p.sale_mode = 'PREORDER' THEN EXISTS (SELECT 1 FROM preorder_campaigns c WHERE c.product_id = p.id) "
-     "ELSE EXISTS (SELECT 1 FROM product_options o JOIN option_inventories i ON i.option_id = o.id "
-     "WHERE o.product_id = p.id) END)"),
+     "ELSE p.stock_ready_at IS NOT NULL AND EXISTS (SELECT 1 FROM product_options o "
+     "JOIN option_inventories i ON i.option_id = o.id WHERE o.product_id = p.id) END)"),
     ('사전예약 옵션의 재고 행 · 회차가 있는 일반 판매 상품',
      "SELECT (SELECT COUNT(*) FROM option_inventories i JOIN product_options o ON o.id = i.option_id "
      "JOIN products p ON p.id = o.product_id WHERE p.sale_mode = 'PREORDER') "
