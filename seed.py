@@ -31,7 +31,7 @@ SHOP_TABLES = [
     'preorder_events', 'preorders', 'shipment_batches', 'preorder_campaigns', 'refresh_tokens', 'customers',
     'option_inventories', 'product_options', 'products', 'catalog_outbox_events', 'categories',
     'notifications', 'preorder_open_alert_dispatches', 'preorder_open_alerts', 'promotion_products', 'promotions',
-    'images', 'stock_adjustments', 'stock_reconcile_runs',
+    'images', 'stock_adjustments', 'stock_reconcile_runs', 'banners',
 ]
 # 아직 be dev 에 없는 테이블 — 있을 때만 비운다(정합성 검사 결과 · 사진 정리의 삭제 대기는 epic/NV-441 마이그레이션에만 있다).
 # dev 에 들어오면 위로 옮긴다

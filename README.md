@@ -20,7 +20,7 @@
 MySQL 하나에 shop · external_mock 을 같이 만든다(운영과 같은 구성). Git Bash 에서, be · mock 저장소가 이 저장소 옆에 있다고 본다.
 be 는 `dev`, mock 은 `epic/NV-1` 을 받아 둔다 — 그보다 옛 Mock 스키마는 원장 회원 · 상품 칸이 `BINARY(16)` 이 아니라 시드가 들어가지 않는다.
 정합성 검사 결과 테이블 · 사진 정리의 삭제 대기(`image_deletions`)까지 쓰려면 be 를 `epic/NV-441` 로 받는다(dev 에 합쳐지기 전). 시드는 그 테이블들이 있으면 같이 비운다.
-알림 · 오픈 알림 · 홍보 · 사진(`images`) · 재고 보정 테이블은 비우기만 하고 채우지 않는다.
+알림 · 오픈 알림 · 홍보 · 메인 배너(`banners`) · 사진(`images`) · 재고 보정 테이블은 비우기만 하고 채우지 않는다.
 
 ```bash
 docker run -d --name seed-db -p 127.0.0.1:3309:3306 -e MYSQL_ROOT_PASSWORD=seed mysql:8.4 --transaction-isolation=READ-COMMITTED
