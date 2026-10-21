@@ -6,7 +6,7 @@
 **로컬 전용이다.** Flyway 마이그레이션에 넣지 않는다. 접속 주소가 이 PC(`localhost` · `127.0.0.1` · `::1`)가 아니면 돌지 않고,
 포트 포워딩으로 붙인 RDS(basedir 이 `/rdsdbbin/`)도 막는다 — 시드는 테이블을 비우고 다시 채운다.
 
-기준: be `dev` 스키마(엔티티 id UUID v7 · 시도의 세대 · 차례 · 작업 실행 회차 · 상품 브랜드 · 모델명 · 바로 구매 멱등 키 · 주문 결제 시각 · 회차 상품 사본 · 일반 상품 판매 준비 시각, 2026-10-19 마이그레이션 65개) · Mock 저장소 `epic/NV-1`(원장 회원 · 상품 `BINARY(16)`) ·
+기준: be `dev` 스키마(엔티티 id UUID v7 · 시도의 세대 · 차례 · 작업 실행 회차 · 상품 브랜드 · 모델명 · 바로 구매 멱등 키 · 주문 결제 시각 · 회차 상품 사본 · 일반 상품 판매 준비 시각 · 주문 줄 사진 · 정합성 결과 · 사진 삭제 대기, 2026-10-20 마이그레이션 68개) · Mock 저장소 `epic/NV-1`(원장 회원 · 상품 `BINARY(16)`) ·
 상품은 fe `develop` 의 화면 목업.
 
 ## 준비
@@ -19,8 +19,7 @@
 
 MySQL 하나에 shop · external_mock 을 같이 만든다(운영과 같은 구성). Git Bash 에서, be · mock 저장소가 이 저장소 옆에 있다고 본다.
 be 는 `dev`, mock 은 `epic/NV-1` 을 받아 둔다 — 그보다 옛 Mock 스키마는 원장 회원 · 상품 칸이 `BINARY(16)` 이 아니라 시드가 들어가지 않는다.
-정합성 검사 결과 테이블 · 사진 정리의 삭제 대기(`image_deletions`)까지 쓰려면 be 를 `epic/NV-441` 로 받는다(dev 에 합쳐지기 전). 시드는 그 테이블들이 있으면 같이 비운다.
-알림 · 오픈 알림 · 홍보 · 메인 배너(`banners`) · 사진(`images`) · 재고 보정 테이블은 비우기만 하고 채우지 않는다.
+알림 · 오픈 알림 · 홍보 · 메인 배너(`banners`) · 사진(`images`) · 재고 보정 · 결제 이상(`preorder_payment_anomalies`) · 정합성 검사 결과 · 사진 정리의 삭제 대기(`image_deletions`) 테이블은 비우기만 하고 채우지 않는다.
 
 ```bash
 docker run -d --name seed-db -p 127.0.0.1:3309:3306 -e MYSQL_ROOT_PASSWORD=seed mysql:8.4 --transaction-isolation=READ-COMMITTED
